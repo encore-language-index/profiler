@@ -1,0 +1,11 @@
+[project]
+name = "profiler"
+version = "0.0.0"
+encore = ">=0.1.6"
+description = "Function timing decorators with independent profiling collectors"
+readme = "README.md"
+licence = "MIT"
+dependencies = [
+    "index@std@0.0.8",
+    "sys@core",
+]

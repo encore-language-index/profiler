@@ -1,0 +1,241 @@
+//! Single-threaded timing collectors for synchronous and asynchronous functions.
+import core::option::Option
+import core::vec::Vec
+
+import std::time::perf_counter_ns
+
+/// An immutable aggregate copied out of a collector by snapshot().
+pub struct ProfileStats {
+    label: str
+    calls: u64
+    total_ns: u64
+    min_ns: u64
+    max_ns: u64
+    p50_ns: u64
+    p95_ns: u64
+    p99_ns: u64
+}
+
+impl for ProfileStats {
+    pub fn label(self: Self) -> str {
+        ret self.label
+    }
+
+    pub fn calls(self: Self) -> u64 {
+        ret self.calls
+    }
+
+    pub fn total_ns(self: Self) -> u64 {
+        ret self.total_ns
+    }
+
+    pub fn min_ns(self: Self) -> u64 {
+        ret self.min_ns
+    }
+
+    pub fn max_ns(self: Self) -> u64 {
+        ret self.max_ns
+    }
+
+    pub fn mean_ns(self: Self) -> f64 {
+        if self.calls == 0_u64 {
+            ret 0.0
+        }
+        ret self.total_ns as f64 / self.calls as f64
+    }
+
+    pub fn p50_ns(self: Self) -> u64 {
+        ret self.p50_ns
+    }
+
+    pub fn p95_ns(self: Self) -> u64 {
+        ret self.p95_ns
+    }
+
+    pub fn p99_ns(self: Self) -> u64 {
+        ret self.p99_ns
+    }
+}
+
+struct ProfileEntry {
+    label: str
+    calls: u64
+    total_ns: u64
+    min_ns: u64
+    max_ns: u64
+    samples: Vec[u64]
+}
+
+fn sift_down(values: mut Vec[u64], start: usize, length: usize) ->() {
+    let mut root = start
+    while root < length / 2_usize {
+        let mut child = root * 2_usize + 1_usize
+        if child + 1_usize < length &&
+        values.get_unchecked_borrowed(child) < values.get_unchecked_borrowed(child + 1_usize) {
+            child += 1_usize
+        }
+        let value = values.get_unchecked_borrowed(root)
+        let larger = values.get_unchecked_borrowed(child)
+        if value >= larger {
+            ret()
+        }
+        values.set(root, larger)
+        values.set(child, value)
+        root = child
+    }
+}
+
+fn sorted_samples(samples: Vec[u64]) -> Vec[u64] {
+    let mut values = Vec[u64]::with_capacity(samples.len())
+    for sample in samples {
+        values.push(sample)
+    }
+    let mut root = values.len() / 2_usize
+    while root > 0_usize {
+        root -= 1_usize
+        sift_down(values, root, values.len())
+    }
+    let mut end = values.len()
+    while end > 1_usize {
+        end -= 1_usize
+        let largest = values.get_unchecked_borrowed(0_usize)
+        values.set(0_usize, values.get_unchecked_borrowed(end))
+        values.set(end, largest)
+        sift_down(values, 0_usize, end)
+    }
+    ret values
+}
+
+/// The smallest observed value whose cumulative rank reaches the percentage.
+fn percentile(sorted: Vec[u64], percentage: usize) -> u64 {
+    let length = sorted.len()
+    if length == 0_usize {
+        ret 0_u64
+    }
+    // ceil(length * percentage / 100), without overflowing the product.
+    let rank =(length / 100_usize) * percentage +
+    ((length % 100_usize) * percentage + 99_usize) / 100_usize
+    ret sorted.get_unchecked_borrowed(rank - 1_usize)
+}
+
+fn summarize(entry: ProfileEntry) -> ProfileStats {
+    let sorted = sorted_samples(entry.samples)
+    ret ProfileStats {
+        entry.label, entry.calls, entry.total_ns, entry.min_ns, entry.max_ns,
+        percentile(sorted, 50_usize), percentile(sorted, 95_usize), percentile(sorted, 99_usize)
+    }
+}
+
+/// One collector, owned by a heap node. Copies of its handle share statistics.
+/// Use only on one OS thread, including cooperatively scheduled async tasks.
+pub struct Profiler {
+    name: str
+    entries: Vec[ProfileEntry]
+}
+
+impl for Profiler {
+    /// Creates a new independent collector, even when another has the same name.
+    pub fn new(name: str) -> Profiler<H> {
+        ret Profiler<H>{ name, Vec[ProfileEntry]::new() }
+    }
+
+    pub fn name(self: Self&) -> str {
+        ret self.name
+    }
+
+    /// Returns independent statistics for a completed label, or None if absent.
+    pub fn stats(self: Self&, label: str) -> Option[ProfileStats] {
+        for entry in self.entries {
+            if entry.label == label {
+                ret Option[ProfileStats]::Some(summarize(entry))
+            }
+        }
+        ret Option[ProfileStats]::None
+    }
+
+    /// Returns independent storage in first-seen label order.
+    pub fn snapshot(self: Self&) -> Vec[ProfileStats] {
+        let mut entries = Vec[ProfileStats]::with_capacity(self.entries.len())
+        for entry in self.entries {
+            entries.push(summarize(entry))
+        }
+        ret entries
+    }
+
+    /// Formats a report without printing it or clearing the collector.
+    pub fn report_text(self: Self&) -> str {
+        let mut text = f"Profiler: {self.name}\nlabel | calls | total_ns | min_ns | max_ns | mean_ns | p50_ns | p95_ns | p99_ns\n"
+        for entry in self.snapshot() {
+            text += f"{entry.label} | {entry.calls} | {entry.total_ns} | {entry.min_ns} | {entry.max_ns} | {entry.mean_ns()} | {entry.p50_ns()} | {entry.p95_ns()} | {entry.p99_ns()}\n"
+        }
+        ret text
+    }
+
+    /// Clears completed samples. Calls still in flight are recorded on completion.
+    pub fn reset(self: mut Self&) ->() {
+        self.entries.clear()
+    }
+
+    fn record(self: mut Self&, label: str, elapsed_ns: u64) ->() {
+        for index in 0_usize..self.entries.len() {
+            let mut entry = self.entries.get_unchecked_borrowed(index)
+            if entry.label == label {
+                entry.calls += 1_u64
+                entry.total_ns += elapsed_ns
+                if elapsed_ns < entry.min_ns {
+                    entry.min_ns = elapsed_ns
+                }
+                if elapsed_ns > entry.max_ns {
+                    entry.max_ns = elapsed_ns
+                }
+                entry.samples.push(elapsed_ns)
+                self.entries.set(index, entry)
+                ret()
+            }
+        }
+        self.entries.push(ProfileEntry {
+                label, 1_u64, elapsed_ns, elapsed_ns, elapsed_ns, vec![elapsed_ns]
+            }
+        )
+    }
+
+    /// Measures one completed call, preserving its arguments and return value.
+    #attr(decorator)
+    pub fn profile[Args, R](
+        self: mut Self&,
+        func: Callable[Args, R],
+        args: Args,
+        label: str,
+    ) -> R {
+        let start = perf_counter_ns()
+        let output = func(args)
+        let end = perf_counter_ns()
+        let elapsed = if end >= start {
+            end - start
+        } else {
+            0_u64
+        }
+        self.record(label, elapsed)
+        ret output
+    }
+
+    /// Measures through completion, including time suspended at await points.
+    #attr(decorator)
+    pub async fn profile_async[Args, R](
+        self: mut Self&,
+        func: Callable[Args, R],
+        args: Args,
+        label: str,
+    ) -> R {
+        let start = perf_counter_ns()
+        let output = await func(args)
+        let end = perf_counter_ns()
+        let elapsed = if end >= start {
+            end - start
+        } else {
+            0_u64
+        }
+        self.record(label, elapsed)
+        ret output
+    }
+}

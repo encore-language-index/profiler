@@ -1,0 +1,27 @@
+import core::option::Option
+
+import std::io::println
+
+import profiler::Profiler
+
+static profiler = Profiler::new("profiler")
+
+@profiler.profile("some log")
+fn add(a: u32, b: u32) -> u32 {
+    ret a + b
+}
+
+fn main() -> u32 {
+    for i in 0..10000 {
+        add(5, 2)
+    }
+    println(f"{profiler.report_text()}")
+    match profiler.stats("some log") {
+        Option::Some(stats) => {
+            println(f"{stats.label()}: {stats.calls()} calls, mean={stats.mean_ns()} ns, p50={stats.p50_ns()} ns, p95={stats.p95_ns()} ns, p99={stats.p99_ns()} ns")
+        }
+        Option::None => {
+        }
+    }
+    ret 0
+}

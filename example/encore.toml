@@ -1,0 +1,11 @@
+[project]
+encore = ">=0.1.6"
+name = "profiler-example"
+version = "0.0.0"
+description = "Profiler usage example"
+readme = "README.md"
+licence = "MIT"
+dependencies = [
+    "index@profiler@0.0.0",
+    "index@std@0.0.8",
+]

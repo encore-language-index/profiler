@@ -1,0 +1,7 @@
+
+# Local Encore build output and environment files
+target/
+.env
+.env.*
+!.env.example
+!.env.template
